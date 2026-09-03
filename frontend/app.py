@@ -119,29 +119,58 @@ if submitted:
         if response.status_code == 200:
             result = response.json()
             st.session_state["pending_state"] = result["state"]
-            st.warning(
-                f"⏸ Paused before notifying. Pending decision: "
-                f"**{result['state']['decision']}**"
-            )
+            st.session_state["paused_reason"] = result.get("paused_reason")
+
+            if result.get("paused_reason") == "risk_review":
+                st.warning(
+                    "⏸ Paused for **risk review** — this customer has "
+                    "3+ past refunds. No decision has been made yet; "
+                    "a human needs to review before the agent proceeds."
+                )
+            elif result.get("paused_reason") == "notify":
+                st.warning(
+                    f"⏸ Paused before notifying. Pending decision: "
+                    f"**{result['state']['decision']}**"
+                )
             with st.expander("View state", expanded=True):
                 st.json(result["state"])
         else:
             st.error(f"Error: {response.text}")
 
-# --- Approve button, shown only when there's a pending LangGraph run ---
-if "thread_id" in st.session_state and "pending_state" in st.session_state:
-    if not st.session_state["pending_state"].get("notified"):
-        st.divider()
-        if st.button("✅ Approve and notify customer", use_container_width=True, type="primary"):
-            with st.spinner("Resuming after approval..."):
-                approve_response = requests.post(
-                    f"{API_BASE}/complaints/langgraph/{st.session_state['thread_id']}/approve"
-                )
-            if approve_response.status_code == 200:
-                final = approve_response.json()
-                st.success("Notification sent.")
-                with st.expander("View final state", expanded=True):
-                    st.json(final["state"])
-                st.session_state["pending_state"] = final["state"]
-            else:
-                st.error(f"Error: {approve_response.text}")
+# --- Risk-review approve button, shown only when paused at the dynamic interrupt ---
+if st.session_state.get("paused_reason") == "risk_review":
+    st.divider()
+    reviewer_note = st.text_input("Reviewer note", value="approved")
+    if st.button("🔍 Approve risk review", use_container_width=True, type="primary"):
+        with st.spinner("Resuming after risk review..."):
+            review_response = requests.post(
+                f"{API_BASE}/complaints/langgraph/{st.session_state['thread_id']}/risk-review",
+                json={"reviewer_note": reviewer_note},
+            )
+        if review_response.status_code == 200:
+            result = review_response.json()
+            st.session_state["pending_state"] = result["state"]
+            st.session_state["paused_reason"] = result.get("paused_reason")
+            st.success(f"Risk review resumed. Decision made: **{result['state']['decision']}**")
+            with st.expander("View state", expanded=True):
+                st.json(result["state"])
+        else:
+            st.error(f"Error: {review_response.text}")
+
+# --- Approve button, shown only when there's a pending notify checkpoint ---
+if st.session_state.get("paused_reason") == "notify":
+    st.divider()
+    if st.button("✅ Approve and notify customer", use_container_width=True, type="primary"):
+        with st.spinner("Resuming after approval..."):
+            approve_response = requests.post(
+                f"{API_BASE}/complaints/langgraph/{st.session_state['thread_id']}/approve"
+            )
+        if approve_response.status_code == 200:
+            final = approve_response.json()
+            st.success("Notification sent.")
+            with st.expander("View final state", expanded=True):
+                st.json(final["state"])
+            st.session_state["pending_state"] = final["state"]
+            st.session_state["paused_reason"] = final.get("paused_reason")
+        else:
+            st.error(f"Error: {approve_response.text}")
