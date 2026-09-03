@@ -18,9 +18,11 @@ TOOLS = {
 
 def reason(state: dict) -> dict:
     """
-    Plain Python reasoning logic (no LLM call needed here, since the
-    decision tree is deterministic once we have all four pieces of info).
-    Decides which tool to call next, or that we're done.
+    Reasoning logic with real data-dependent branching:
+    - If the order isn't delivered yet, skip straight to a decision
+      (no point checking refund eligibility on an undelivered order).
+    - Only check refund eligibility if the complaint category is
+      actually refund-related.
     """
     if state.get("category") is None:
         return {"next_action": "classify_complaint", "args": {"text": state["text"]}}
@@ -28,14 +30,29 @@ def reason(state: dict) -> dict:
     if state.get("order_status") is None:
         return {"next_action": "check_order_status", "args": {"order_id": state["order_id"]}}
 
+    # --- Branch 1: order not delivered -> skip eligibility, go straight to history + decide ---
+    order_status = state["order_status"]["status"]
+    if order_status != "delivered":
+        if state.get("customer_history") is None:
+            return {"next_action": "check_customer_history", "args": {"customer_id": state["customer_id"]}}
+        if state.get("decision") is None:
+            decision = decide(state)
+            return {"next_action": "decide", "decision": decision}
+        if not state.get("notified"):
+            return {"next_action": "notify_action", "args": {"decision": state["decision"], "customer_id": state["customer_id"]}}
+        return {"next_action": "done"}
+
+    # --- Order IS delivered from here on ---
     if state.get("customer_history") is None:
         return {"next_action": "check_customer_history", "args": {"customer_id": state["customer_id"]}}
 
-    if state.get("refund_eligibility") is None:
+    # --- Branch 2: only check refund eligibility if the complaint is refund-related ---
+    refund_related = state["category"] in ("damage", "lost_item", "refund_request")
+
+    if refund_related and state.get("refund_eligibility") is None:
         return {"next_action": "check_refund_eligibility", "args": {"order_id": state["order_id"]}}
 
     if state.get("decision") is None:
-        # All info gathered — make the decision
         decision = decide(state)
         return {"next_action": "decide", "decision": decision}
 
@@ -47,20 +64,29 @@ def reason(state: dict) -> dict:
 
 def decide(state: dict) -> str:
     """
-    The actual decision logic, combining all 4 tool results —
-    this is the 'dependency' the assignment requires.
+    Decision logic — now branches on whether the order was even delivered.
     """
-    eligibility = state["refund_eligibility"]
-    history = state["customer_history"]
+    order_status = state["order_status"]["status"]
     category = state["category"]
+    history = state["customer_history"]
 
-    if not eligibility["eligible"]:
-        return "escalate_to_human"  # can't auto-refund outside window
+    # Order never arrived — different handling entirely, no refund eligibility needed
+    if order_status == "in_transit":
+        return "send_replacement" if history["past_refunds"] < 3 else "escalate_to_human"
+
+    if order_status == "lost":
+        return "escalate_to_human"  # lost orders always need a human to sort out
+
+    # Order was delivered — normal refund-eligibility-based logic
+    eligibility = state.get("refund_eligibility")
+
+    if eligibility and not eligibility["eligible"]:
+        return "escalate_to_human"
 
     if history["past_refunds"] >= 3:
-        return "escalate_to_human"  # high refund history — needs human judgment
+        return "escalate_to_human"
 
-    if category in ("damage", "lost_item"):
+    if category in ("damage", "lost_item", "refund_request"):
         return "auto_refund"
 
     if category == "late_delivery":

@@ -1,5 +1,6 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
 
 from part2_langgraph.state import ComplaintState
 from part1_raw_python.react_loop import decide  # reuse the same decision logic
@@ -49,8 +50,22 @@ def check_eligibility_node(state: ComplaintState) -> dict:
     result = check_refund_eligibility(state["order_id"])
     return {"refund_eligibility": result}
 
-
 def decide_node(state: ComplaintState) -> dict:
+    history = state["customer_history"]
+
+    # Dynamic, conditional interrupt: only pause for high-risk customers
+    if history["past_refunds"] >= 3:
+        human_review = interrupt({
+            "reason": "High refund history — review before deciding",
+            "customer_history": history,
+            "category": state["category"],
+            "order_status": state["order_status"],
+            "refund_eligibility": state.get("refund_eligibility"),
+        })
+        # human_review is whatever value gets passed in when resuming (see below)
+        # for now, we just log that a human looked at it before proceeding
+        print(f"[HUMAN REVIEW] Reviewer input: {human_review}")
+
     decision = decide(state)
     return {"decision": decision}
 
@@ -67,10 +82,28 @@ def route(state: ComplaintState) -> str:
         return "classify"
     if state.get("order_status") is None:
         return "check_order"
+
+    order_status = state["order_status"]["status"]
+
+    # --- Branch 1: not delivered -> skip eligibility ---
+    if order_status != "delivered":
+        if state.get("customer_history") is None:
+            return "check_history"
+        if state.get("decision") is None:
+            return "decide"
+        if not state.get("notified"):
+            return "notify"
+        return END
+
+    # --- Delivered ---
     if state.get("customer_history") is None:
         return "check_history"
-    if state.get("refund_eligibility") is None:
+
+    refund_related = state["category"] in ("damage", "lost_item", "refund_request")
+
+    if refund_related and state.get("refund_eligibility") is None:
         return "check_eligibility"
+
     if state.get("decision") is None:
         return "decide"
     if not state.get("notified"):
@@ -142,6 +175,14 @@ def run_langgraph_react(complaint: dict, thread_id: str = "default") -> dict:
     result = app.invoke(initial_state, config=config)
     return result
 
+def resume_after_risk_review(thread_id: str, reviewer_note: str = "approved") -> dict:
+    """
+    Resumes a graph paused by the dynamic interrupt() inside decide_node
+    (only triggered for high-refund-history customers).
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+    result = app.invoke(Command(resume=reviewer_note), config=config)
+    return result 
 
 def resume_after_approval(thread_id: str = "default") -> dict:
     """
