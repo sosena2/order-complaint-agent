@@ -9,9 +9,13 @@ from db.models import Order, Customer
 load_dotenv()
 
 # One shared LLM instance, reused by classify_complaint
+# timeout + max_retries so a network/API hiccup fails fast instead of
+# hanging the whole ReAct loop forever
 _llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
     google_api_key=os.getenv("GOOGLE_API_KEY"),
+    timeout=20,
+    max_retries=3,
 )
 
 VALID_CATEGORIES = ["damage", "late_delivery", "lost_item", "refund_request"]
@@ -28,7 +32,16 @@ def classify_complaint(text: str) -> str:
         "Respond with ONLY the category name, nothing else.\n\n"
         f"Complaint: \"{text}\""
     )
-    response = _llm.invoke(prompt)
+    try:
+        response = _llm.invoke(prompt)
+    except Exception as e:
+        # Gemini can return transient 5xx errors under high load even after
+        # the client's internal retries are exhausted. Don't let that take
+        # down the whole complaint pipeline — fall back to a safe default
+        # category so the rest of the ReAct loop (order/history/decision)
+        # can still run, and log the failure so it's visible.
+        print(f"[classify_complaint] LLM call failed, falling back to 'refund_request': {e}")
+        return "refund_request"
 
     # Newer Gemini models can return content as a list of blocks instead of a plain string
     raw_content = response.content

@@ -38,11 +38,15 @@ def classify_node(state: ComplaintState) -> dict:
 
 def check_order_node(state: ComplaintState) -> dict:
     result = check_order_status(state["order_id"])
+    if "error" in result:
+        return {"order_status": result, "error": result["error"]}
     return {"order_status": result}
 
 
 def check_history_node(state: ComplaintState) -> dict:
     result = cached_check_customer_history(state["customer_id"])
+    if "error" in result:
+        return {"customer_history": result, "error": result["error"]}
     return {"customer_history": result}
 
 
@@ -82,6 +86,12 @@ def route(state: ComplaintState) -> str:
         return "classify"
     if state.get("order_status") is None:
         return "check_order"
+
+    # Guard against lookup failures (e.g. an order_id/customer_id that
+    # doesn't exist in the DB) — these come back as {"error": "..."} with
+    # no "status" key, which used to crash the graph with a KeyError.
+    if state.get("error"):
+        return END
 
     order_status = state["order_status"]["status"]
 
@@ -170,6 +180,7 @@ def run_langgraph_react(complaint: dict, thread_id: str = "default") -> dict:
         "refund_eligibility": None,
         "decision": None,
         "notified": False,
+        "error": None,
     }
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(initial_state, config=config)

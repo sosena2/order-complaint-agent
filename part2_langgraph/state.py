@@ -10,3 +10,4 @@ class ComplaintState(TypedDict):
     refund_eligibility: Optional[dict]
     decision: Optional[str]
     notified: bool
+    error: Optional[str]

@@ -32,6 +32,8 @@ def handle_complaint_langgraph(complaint: ComplaintRequest, thread_id: str):
     (right before notify) and returns the pending state for review.
     """
     state = run_langgraph_react(complaint.dict(), thread_id=thread_id)
+    if state.get("error"):
+        raise HTTPException(status_code=404, detail=state["error"])
     return {
         "status": "paused_for_approval",
         "thread_id": thread_id,
